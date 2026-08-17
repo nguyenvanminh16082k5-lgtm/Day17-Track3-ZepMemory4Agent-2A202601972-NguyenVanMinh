@@ -7,8 +7,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /workspace
 
+# Dùng uv để cài đặt song song siêu tốc và không bị lỗi timeout dependency
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --upgrade pip && pip install -r /tmp/requirements.txt
+RUN uv pip install --system -r /tmp/requirements.txt
 
 COPY . /workspace
 

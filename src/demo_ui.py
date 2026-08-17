@@ -22,6 +22,7 @@ or locally:  streamlit run src/demo_ui.py
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -46,21 +47,86 @@ LAYER_COLORS = {
     "semantic": "#7c3aed",
 }
 
+LAYER_ICONS = {
+    "short_term": "💬",
+    "long_term": "🧠",
+    "episodic": "🧭",
+    "semantic": "📚",
+}
+
+LAYER_LABELS_VI = {
+    "short_term": "Short-term",
+    "long_term": "Long-term",
+    "episodic": "Episodic",
+    "semantic": "Semantic",
+}
+
 CSS = """
 <style>
-.block-container { padding-top: 2rem; max-width: 1200px; }
+.block-container { padding-top: 1.6rem; max-width: 1180px; }
+
+h1 { font-weight: 800 !important; letter-spacing: -.01em; }
+
+/* --- layer badges --- */
 .lab-badge {
-    display:inline-block; padding:2px 10px; border-radius:999px;
-    color:#fff; font-size:0.75rem; font-weight:600; letter-spacing:.02em;
-    margin-right:6px;
+    display:inline-flex; align-items:center; gap:5px;
+    padding:3px 12px 3px 8px; border-radius:999px;
+    color:#fff; font-size:0.76rem; font-weight:650; letter-spacing:.01em;
+    margin-right:6px; margin-bottom:4px;
+    box-shadow: 0 1px 2px rgba(0,0,0,.15);
 }
+
+/* --- case hero card --- */
 .lab-card {
-    border:1px solid rgba(128,128,128,.25); border-radius:12px;
-    padding:14px 16px; margin-bottom:12px; background:rgba(127,127,127,.06);
+    position:relative; overflow:hidden;
+    border:1px solid rgba(128,128,128,.22); border-radius:14px;
+    padding:16px 18px 16px 20px; margin-bottom:16px;
+    background:rgba(127,127,127,.05);
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
 }
-.lab-kv { font-size:0.85rem; opacity:.85; }
-.lab-kv b { opacity:1; }
-.stChatMessage { border-radius:12px; }
+.lab-card::before {
+    content:""; position:absolute; left:0; top:0; bottom:0; width:5px;
+    background: var(--lab-accent, #475569);
+}
+.lab-card .lab-id { font-size:1.05rem; font-weight:750; margin-left:2px; }
+.lab-kv { font-size:0.82rem; opacity:.75; }
+.lab-kv b { opacity:1; font-weight:600; }
+.lab-query {
+    margin:.6rem 0 0; font-size:1.02rem; line-height:1.45; font-weight:500;
+}
+.lab-desc { font-size:0.8rem; opacity:.65; font-style:italic; }
+
+/* --- section headers --- */
+.lab-section {
+    display:flex; align-items:center; gap:8px;
+    font-size:1.05rem; font-weight:700; margin: 1.1rem 0 .5rem;
+}
+
+/* --- budget bar rows --- */
+.lab-budget-row { margin-bottom:10px; }
+.lab-budget-top {
+    display:flex; justify-content:space-between; font-size:0.8rem;
+    margin-bottom:3px; opacity:.9;
+}
+.lab-budget-track {
+    height:8px; border-radius:999px; background:rgba(128,128,128,.18); overflow:hidden;
+}
+.lab-budget-fill { height:100%; border-radius:999px; }
+
+/* --- evidence block --- */
+.lab-evidence {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size:0.8rem; line-height:1.55; white-space:pre-wrap; word-break:break-word;
+    background:rgba(127,127,127,.07); border:1px solid rgba(128,128,128,.18);
+    border-radius:10px; padding:12px 14px; max-height:340px; overflow-y:auto;
+}
+
+/* --- misc --- */
+.stChatMessage { border-radius:14px; }
+.lab-pill-track {
+    display:flex; gap:6px; margin: 2px 0 10px; flex-wrap:wrap;
+}
+.lab-empty { opacity:.55; font-size:0.85rem; font-style:italic; }
 </style>
 """
 
@@ -76,12 +142,66 @@ def load_cases() -> list[dict[str, Any]]:
 
 
 def format_case(case: dict[str, Any]) -> str:
-    return f"{case['id']} · {case['expected_layer']} · {case['user_id']}"
+    icon = LAYER_ICONS.get(case["expected_layer"], "🔹")
+    return f"{case['id']} · {icon} {case['expected_layer']} · {case['user_id']}"
 
 
 def layer_badge(layer: str) -> str:
     color = LAYER_COLORS.get(layer, "#475569")
-    return f'<span class="lab-badge" style="background:{color}">{layer}</span>'
+    icon = LAYER_ICONS.get(layer, "🔹")
+    label = LAYER_LABELS_VI.get(layer, layer)
+    return f'<span class="lab-badge" style="background:{color}">{icon} {label}</span>'
+
+
+def budget_bar(layer: str, stats: dict[str, int]) -> str:
+    color = LAYER_COLORS.get(layer, "#475569")
+    icon = LAYER_ICONS.get(layer, "🔹")
+    used = stats.get("used_tokens", 0)
+    limit = max(1, stats.get("limit_tokens", 1))
+    pct = min(100, round(100 * used / limit))
+    return (
+        '<div class="lab-budget-row">'
+        f'<div class="lab-budget-top"><span>{icon} <b>{LAYER_LABELS_VI.get(layer, layer)}</b></span>'
+        f'<span>{used} / {limit} tok</span></div>'
+        f'<div class="lab-budget-track"><div class="lab-budget-fill" '
+        f'style="width:{pct}%;background:{color}"></div></div>'
+        "</div>"
+    )
+
+
+def pretty_evidence(text: str) -> str:
+    """Insert line breaks before structural markers so raw retrieval text reads
+    like a short list instead of one dense wall of characters."""
+    if not text:
+        return ""
+    markers = (
+        "EPISODE:", "FACT:", "ENTITY:", "OBSERVATION:", "THREAD_SUMMARY:",
+        "<SESSION_SUMMARY>", "<DURABLE_NOTES>", "<RECENT_TURNS>",
+        "<USER_SUMMARY>", "<EPISODES>", "<FACTS>",
+        "<LONG_TERM>", "<EPISODIC>", "<SEMANTIC>", "<SHORT_TERM>",
+    )
+    out = text
+    for marker in markers:
+        out = re.sub(rf"\s*(?<!^)(?={re.escape(marker)})", "\n", out)
+    return out.strip()
+
+
+def _short_term_text(case: dict[str, Any], extra_messages: list[dict[str, str]]) -> str:
+    stm = ShortTermMemory(strategy="sliding", max_recent_messages=6, pressure_tokens=450)
+    messages = case.get("fixture_messages")
+    if not messages:
+        dataset = load_dataset()
+        user = next((u for u in dataset["users"] if u["user_id"] == case["user_id"]), None)
+        session = next(
+            (s for s in (user or {}).get("sessions", []) if s["thread_id"] == case.get("thread_id")),
+            None,
+        )
+        messages = (session or {}).get("messages", [])
+    for msg in messages or []:
+        stm.add(msg["role"], msg["content"])
+    for msg in extra_messages or []:
+        stm.add(msg["role"], msg["content"])
+    return stm.render()
 
 
 def retrieve_for_case(
@@ -89,42 +209,54 @@ def retrieve_for_case(
     case: dict[str, Any],
     extra_messages: list[dict[str, str]],
 ) -> dict[str, Any]:
-    """BONUS TODO: run student retrieval for the loaded case.
+    """Run student retrieval for the loaded case, across whichever layers apply.
 
-    Return a dict with keys:
-      - "merged_context": str  (StudentMemory.assemble_context output)
-      - "layers": dict[str, str]  (per-layer evidence: short_term/long_term/
-                                   episodic/semantic)
-      - "budget": dict  (the breakdown from assemble_context)
-
-    Hints:
-      * Build short_term from case["fixture_messages"] if present, else from
-        the matching user/thread messages in data/sessions.json, plus
-        extra_messages. E01 has no fixture — it uses thread minh-s1.
-      * Decide which durable layers to fetch from case["expected_layer"] (or
-        case["retrieve_layers"] for "mixed"), then call
-        memory.retrieve_long_term / retrieve_episodic / retrieve_semantic.
-      * Keep user_id and thread_id from the loaded case.
-      * Finish with memory.assemble_context(layers).
+    Short-term is always included (fixture/session messages + live chat turns)
+    so a continued conversation stays coherent. Durable layers are chosen from
+    case["expected_layer"] ("mixed" cases use case["retrieve_layers"]).
     """
-    _ = (memory, case, extra_messages, settings, ShortTermMemory)
-    raise NotImplementedError("BONUS TODO: run student retrieval for the loaded case")
+    query = case.get("query", "")
+    user_id = case["user_id"]
+    thread_id = case.get("thread_id", "")
+    layer = case.get("expected_layer", "mixed")
+
+    default_layers = ["long_term", "semantic"] if layer == "mixed" else [layer]
+    wanted = set(case.get("retrieve_layers") or default_layers)
+    wanted.add("short_term")
+
+    layers = {"short_term": "", "long_term": "", "episodic": "", "semantic": ""}
+    layers["short_term"] = _short_term_text(case, extra_messages)
+
+    if "long_term" in wanted:
+        layers["long_term"] = memory.retrieve_long_term(
+            user_id=user_id, thread_id=thread_id, query=query
+        )
+    if "episodic" in wanted:
+        layers["episodic"] = memory.retrieve_episodic(user_id, query)
+    if "semantic" in wanted:
+        layers["semantic"] = memory.retrieve_semantic(settings.semantic_graph_id, query)
+
+    merged_context, budget = memory.assemble_context(layers)
+    return {"merged_context": merged_context, "layers": layers, "budget": budget}
 
 
 def main() -> None:
     st.set_page_config(page_title="Lab 17 Memory Demo", page_icon="🧠", layout="wide")
     st.markdown(CSS, unsafe_allow_html=True)
     st.title("🧠 Lab 17 — Memory Agent Demo")
-    st.caption("Load a test case, inspect layered retrieval, then keep chatting as that user.")
+    st.caption("Chọn 1 test case, xem agent lấy trí nhớ ở layer nào, rồi chat tiếp với đúng user đó.")
 
     with st.sidebar:
         st.header("⚙️ Setup")
         zep_ok = bool(settings.zep_api_key)
-        st.markdown(("✅" if zep_ok else "⚠️") + " Zep API key "
-                    + ("configured" if zep_ok else "missing"))
-        st.markdown(("✅" if gemini_available() else "⚠️") + " Gemini key "
-                    + ("configured" if gemini_available() else "missing"))
+        gem_ok = gemini_available()
+        st.markdown(("🟢" if zep_ok else "🔴") + " **Zep API key** " + ("OK" if zep_ok else "thiếu"))
+        st.markdown(("🟢" if gem_ok else "🟡") + " **Gemini key** " + ("OK" if gem_ok else "thiếu (vẫn chạy được retrieval)"))
         st.caption(f"Chat model: `{settings.gemini_model}`")
+        st.divider()
+        st.markdown("**Chú giải layer**")
+        for lname in ("short_term", "long_term", "episodic", "semantic"):
+            st.markdown(layer_badge(lname), unsafe_allow_html=True)
         st.divider()
 
         cases = load_cases()
@@ -132,16 +264,19 @@ def main() -> None:
             st.error("No evaluation cases found.")
             return
         labels = [format_case(c) for c in cases]
-        chosen = st.selectbox("Test case", labels)
+        chosen = st.selectbox("📂 Test case", labels)
         case = cases[labels.index(chosen)]
 
+    accent = LAYER_COLORS.get(case.get("expected_layer", ""), "#475569")
     st.markdown(
-        f'<div class="lab-card">{layer_badge(case.get("expected_layer","?"))}'
-        f'<b>{case["id"]}</b><br>'
+        f'<div class="lab-card" style="--lab-accent:{accent}">'
+        f'{layer_badge(case.get("expected_layer","?"))}'
+        f'<span class="lab-id">{case["id"]}</span><br>'
         f'<span class="lab-kv"><b>User:</b> {case.get("user_id","-")} &nbsp;·&nbsp; '
         f'<b>Thread:</b> {case.get("thread_id","-")}</span>'
-        f'<p style="margin:.5rem 0 0">{case.get("query","")}</p>'
-        f'<span class="lab-kv">{case.get("description","")}</span></div>',
+        f'<p class="lab-query">“{case.get("query","")}”</p>'
+        + (f'<span class="lab-desc">{case.get("description","")}</span>' if case.get("description") else "")
+        + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -150,61 +285,76 @@ def main() -> None:
         st.session_state.chat = []
         st.session_state.pop("last_result", None)
 
-    col_run, _ = st.columns([1, 3])
-    if col_run.button("▶️ Run retrieval on this case", use_container_width=True):
+    if st.button("▶️ Run retrieval trên case này", type="primary"):
         try:
-            memory = StudentMemory(get_zep_client())
-            st.session_state.last_result = retrieve_for_case(memory, case, st.session_state.chat)
+            with st.spinner("Đang truy vấn Zep..."):
+                memory = StudentMemory(get_zep_client())
+                st.session_state.last_result = retrieve_for_case(memory, case, st.session_state.chat)
         except Exception as exc:  # noqa: BLE001
             st.exception(exc)
 
     result = st.session_state.get("last_result")
     if result:
-        st.markdown("### 🔎 Retrieved context")
         active = [k for k, v in result["layers"].items() if v.strip()]
-        st.markdown(" ".join(layer_badge(k) for k in active) or "_(nothing retrieved)_",
-                    unsafe_allow_html=True)
+
+        st.markdown('<div class="lab-section">🔎 Layer nào có dữ liệu</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="lab-pill-track">{"".join(layer_badge(k) for k in active) or "<span class=lab-empty>(không có gì được lấy về)</span>"}</div>',
+            unsafe_allow_html=True,
+        )
 
         if result.get("budget"):
-            cols = st.columns(4)
-            for i, layer in enumerate(("short_term", "long_term", "episodic", "semantic")):
-                b = result["budget"].get(layer, {})
-                cols[i].metric(
-                    layer,
-                    f"{b.get('used_tokens', 0)} tok",
-                    help=f"limit {b.get('limit_tokens', 0)} · raw {b.get('raw_tokens', 0)}",
-                )
+            st.markdown('<div class="lab-section">📊 Token budget mỗi layer (10% / 4% / 3% / 3%)</div>', unsafe_allow_html=True)
+            bars = "".join(
+                budget_bar(layer_name, result["budget"].get(layer_name, {}))
+                for layer_name in ("short_term", "long_term", "episodic", "semantic")
+            )
+            st.markdown(bars, unsafe_allow_html=True)
 
-        with st.expander("Merged context (budget-trimmed)", expanded=True):
-            st.code(result.get("merged_context") or "(empty)", language="markdown")
+        st.markdown('<div class="lab-section">🧩 Merged context (đã cắt theo budget)</div>', unsafe_allow_html=True)
+        merged = pretty_evidence(result.get("merged_context") or "")
+        st.markdown(f'<div class="lab-evidence">{merged or "(rỗng)"}</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="lab-section">📜 Chi tiết theo từng layer</div>', unsafe_allow_html=True)
         for name, text in result["layers"].items():
             if text.strip():
-                with st.expander(f"{name} evidence"):
-                    st.write(text)
+                with st.expander(f'{LAYER_ICONS.get(name,"🔹")} {LAYER_LABELS_VI.get(name, name)} evidence', expanded=False):
+                    st.markdown(f'<div class="lab-evidence">{pretty_evidence(text)}</div>', unsafe_allow_html=True)
 
-    st.markdown("### 💬 Continue chat as this user")
+    st.divider()
+    st.markdown('<div class="lab-section">💬 Chat tiếp với đúng user này</div>', unsafe_allow_html=True)
     for msg in st.session_state.get("chat", []):
-        with st.chat_message(msg["role"]):
+        avatar = "🧑" if msg["role"] == "user" else "🤖"
+        with st.chat_message(msg["role"], avatar=avatar):
             st.write(msg["content"])
+            layers_used = msg.get("layers_used")
+            if layers_used:
+                st.caption("Dùng: " + ", ".join(f"{LAYER_ICONS.get(l,'🔹')} {LAYER_LABELS_VI.get(l,l)}" for l in layers_used))
 
-    prompt = st.chat_input("Message as this user…")
+    prompt = st.chat_input("Nhắn tiếp với vai trò user này…")
     if prompt:
         st.session_state.chat.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
+        with st.chat_message("user", avatar="🧑"):
             st.write(prompt)
         try:
             memory = StudentMemory(get_zep_client())
-            follow = retrieve_for_case(memory, {**case, "query": prompt}, st.session_state.chat)
-            st.session_state.last_result = follow
-            context = follow.get("merged_context", "")
-            if gemini_available():
-                reply = generate_reply(context, st.session_state.chat[:-1], prompt)
-            else:
-                reply = ("_(Gemini key missing — showing retrieved context instead)_\n\n"
-                         + (context[:1500] or "(no memory retrieved)"))
-            st.session_state.chat.append({"role": "assistant", "content": reply})
-            with st.chat_message("assistant"):
+            with st.spinner("Đang truy hồi trí nhớ + soạn câu trả lời..."):
+                follow = retrieve_for_case(memory, {**case, "query": prompt}, st.session_state.chat)
+                st.session_state.last_result = follow
+                context = follow.get("merged_context", "")
+                if gemini_available():
+                    reply = generate_reply(context, st.session_state.chat[:-1], prompt)
+                else:
+                    reply = ("_(Gemini key missing — showing retrieved context instead)_\n\n"
+                             + (context[:1500] or "(no memory retrieved)"))
+            layers_used = [k for k, v in follow["layers"].items() if v.strip()]
+            st.session_state.chat.append(
+                {"role": "assistant", "content": reply, "layers_used": layers_used}
+            )
+            with st.chat_message("assistant", avatar="🤖"):
                 st.write(reply)
+                if layers_used:
+                    st.caption("Dùng: " + ", ".join(f"{LAYER_ICONS.get(l,'🔹')} {LAYER_LABELS_VI.get(l,l)}" for l in layers_used))
         except Exception as exc:  # noqa: BLE001
             st.exception(exc)
 
